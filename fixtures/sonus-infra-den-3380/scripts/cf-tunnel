@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+# Cloudflare tunnel from public hostnames on sonusauris.app to local dev servers.
+#
+# Why a tunnel rather than DNS to a host: local backends get a real HTTPS origin
+# that phones, simulators and emulators can reach without a public IP, without
+# opening a port, and without per-device network config. An Android emulator
+# needs 10.0.2.2 for the host loopback and an iOS simulator needs localhost;
+# a tunnel hostname is the same string everywhere, including on a real handset.
+#
+#   scripts/cf-tunnel <env-file> up       create/adopt the tunnel, wire DNS, run it
+#   scripts/cf-tunnel <env-file> status   show tunnel + hostname health
+#   scripts/cf-tunnel <env-file> down     stop the local process (keeps the tunnel)
+#   scripts/cf-tunnel <env-file> destroy  delete the tunnel and its DNS records
+#
+# Two different Cloudflare tokens are required and they are NOT interchangeable:
+#
+#   CLOUDFLARE_API_TOKEN      account-scoped. Creates and configures tunnels
+#                             (and reaches R2). Cannot edit DNS.
+#   CLOUDFLARE_DNS_API_TOKEN  zone-scoped, DNS:Edit. Creates the CNAMEs.
+#                             Cannot see the account or R2.
+#
+# Cloudflare does not offer one token that does both without granting far more
+# than either job needs, so this script asks for both and says which is missing.
+
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=./_env-lib
+source "$repo_root/scripts/_env-lib"
+
+env_file="${1:-$repo_root/env/enc/dev.env.enc}"
+action="${2:-status}"
+
+load_env_file "$env_file"
+require_filled CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID CLOUDFLARE_ZONE_NAME
+
+: "${TUNNEL_NAME:=sonus-localhost-dev}"
+# hostname=local-service pairs. Anything not listed returns 404 at the edge.
+: "${TUNNEL_INGRESS:=api-dev=http://localhost:8088 web-dev=http://localhost:8099}"
+
+state_dir="$repo_root/.tunnel"
+pid_file="$state_dir/cloudflared.pid"
+mkdir -p "$state_dir"
+
+# Return only the PID recorded by this checkout, and only while that process is
+# still a cloudflared tunnel using this checkout's token file. The workstation
+# can legitimately run other tunnels; process-wide pgrep/pkill patterns must
+# never adopt or terminate them.
+managed_tunnel_pid() {
+  local pid command_line
+  [ -r "$pid_file" ] || return 1
+  IFS= read -r pid <"$pid_file"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  command_line="$(ps -ww -p "$pid" -o command= 2>/dev/null || true)"
+  [[ "$command_line" == *cloudflared* ]] || return 1
+  [[ "$command_line" == *"tunnel run"* ]] || return 1
+  [[ "$command_line" == *"--token-file $state_dir/token"* ]] || return 1
+  printf '%s' "$pid"
+}
+
+cf_account() {
+  local method="$1" path="$2"; shift 2
+  curl -sS -X "$method" "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}${path}" \
+    -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json" "$@"
+}
+
+cf_zone() {
+  local method="$1" path="$2"; shift 2
+  local token="${CLOUDFLARE_DNS_API_TOKEN:-$CLOUDFLARE_API_TOKEN}"
+  curl -sS -X "$method" "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}${path}" \
+    -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" "$@"
+}
+
+ok() { jq -e '.success' >/dev/null 2>&1; }
+
+find_tunnel_id() {
+  cf_account GET "/cfd_tunnel?name=${TUNNEL_NAME}&is_deleted=false" |
+    jq -r '.result[0].id // empty' 2>/dev/null
+}
+
+cmd_up() {
+  need_tools
+  local id
+  id="$(find_tunnel_id || true)"
+
+  if [ -z "$id" ]; then
+    # tunnel_secret must be 32+ bytes base64; the token Cloudflare returns is
+    # what cloudflared authenticates with, so it is stored 0600 and gitignored.
+    local secret response
+    secret="$(head -c 32 /dev/urandom | base64)"
+    response="$(cf_account POST "/cfd_tunnel" --data "$(jq -n \
+      --arg n "$TUNNEL_NAME" --arg s "$secret" \
+      '{name:$n, tunnel_secret:$s, config_src:"cloudflare"}')")"
+    if ! printf '%s' "$response" | ok; then
+      die "could not create tunnel: $(printf '%s' "$response" | jq -r '[.errors[]?|"\(.code) \(.message)"]|join("; ")')
+  CLOUDFLARE_API_TOKEN needs account-level Cloudflare Tunnel:Edit."
+    fi
+    id="$(printf '%s' "$response" | jq -r '.result.id')"
+    install -m 600 /dev/null "$state_dir/token"
+    printf '%s' "$response" | jq -r '.result.token' >"$state_dir/token"
+    printf 'created tunnel %s (%s)\n' "$TUNNEL_NAME" "$id"
+  else
+    printf 'adopting existing tunnel %s (%s)\n' "$TUNNEL_NAME" "$id"
+    if [ ! -s "$state_dir/token" ]; then
+      # The run token is only returned at creation; re-fetch it.
+      local t
+      t="$(cf_account GET "/cfd_tunnel/$id/token" | jq -r '.result // empty')"
+      [ -n "$t" ] || die "tunnel exists but its run token could not be fetched; 'destroy' then 'up'"
+      install -m 600 /dev/null "$state_dir/token"
+      printf '%s' "$t" >"$state_dir/token"
+    fi
+  fi
+  printf '%s' "$id" >"$state_dir/id"
+
+  # Ingress: build the rule list from TUNNEL_INGRESS, always ending in the
+  # catch-all Cloudflare requires as the final rule.
+  local rules="[]" pair host svc
+  for pair in $TUNNEL_INGRESS; do
+    host="${pair%%=*}"; svc="${pair#*=}"
+    rules="$(jq -c --arg h "${host}.${CLOUDFLARE_ZONE_NAME}" --arg s "$svc" \
+      '. + [{hostname:$h, service:$s}]' <<<"$rules")"
+  done
+  rules="$(jq -c '. + [{service:"http_status:404"}]' <<<"$rules")"
+
+  cf_account PUT "/cfd_tunnel/$id/configurations" \
+    --data "$(jq -n --argjson i "$rules" '{config:{ingress:$i}}')" | ok ||
+    die "could not set tunnel ingress"
+  printf 'ingress configured (%s rules)\n' "$(jq 'length' <<<"$rules")"
+
+  # DNS. Proxied CNAME per hostname pointing at the tunnel.
+  for pair in $TUNNEL_INGRESS; do
+    host="${pair%%=*}"
+    local fqdn="${host}.${CLOUDFLARE_ZONE_NAME}" existing
+    existing="$(cf_zone GET "/dns_records?name=${fqdn}" | jq -r '.result[0].id // empty')"
+    local body
+    body="$(jq -n --arg n "$host" --arg c "${id}.cfargotunnel.com" \
+      '{type:"CNAME", name:$n, content:$c, proxied:true, ttl:1}')"
+    if [ -n "$existing" ]; then
+      cf_zone PUT "/dns_records/$existing" --data "$body" | ok &&
+        printf '  dns %-28s updated\n' "$fqdn" ||
+        printf '  dns %-28s FAILED (CLOUDFLARE_DNS_API_TOKEN needs DNS:Edit)\n' "$fqdn"
+    else
+      cf_zone POST "/dns_records" --data "$body" | ok &&
+        printf '  dns %-28s created\n' "$fqdn" ||
+        printf '  dns %-28s FAILED (CLOUDFLARE_DNS_API_TOKEN needs DNS:Edit)\n' "$fqdn"
+    fi
+  done
+
+  preflight_origins
+
+  local pid
+  if pid="$(managed_tunnel_pid)"; then
+    printf 'managed cloudflared already running (pid %s)\n' "$pid"
+  else
+    # token-file keeps the credential out of argv and process listings.
+    nohup cloudflared tunnel run --token-file "$state_dir/token" \
+      >"$state_dir/cloudflared.log" 2>&1 &
+    pid="$!"
+    printf '%s\n' "$pid" >"$pid_file"
+    sleep 1
+    managed_tunnel_pid >/dev/null ||
+      die "managed cloudflared exited during startup (see .tunnel/cloudflared.log)"
+    printf 'managed cloudflared started (pid %s; log: .tunnel/cloudflared.log)\n' "$pid"
+  fi
+}
+
+cmd_status() {
+  need_tools
+  local id
+  id="$(find_tunnel_id || true)"
+  [ -n "$id" ] || { printf 'no tunnel named %s\n' "$TUNNEL_NAME"; return 0; }
+  printf 'tunnel   %s (%s)\n' "$TUNNEL_NAME" "$id"
+  local pid
+  if pid="$(managed_tunnel_pid)"; then
+    printf 'local    running (managed pid %s)\n' "$pid"
+  else
+    printf 'local    not running\n'
+  fi
+  printf 'edge     %s connection(s)\n' \
+    "$(cf_account GET "/cfd_tunnel/$id/connections" | jq '[.result[]?] | length' 2>/dev/null || echo '?')"
+  local pair host
+  for pair in $TUNNEL_INGRESS; do
+    host="${pair%%=*}"
+    printf '  https://%-30s %s\n' "${host}.${CLOUDFLARE_ZONE_NAME}/healthz" \
+      "$(curl -s -o /dev/null -m 15 -w '%{http_code}' "https://${host}.${CLOUDFLARE_ZONE_NAME}/healthz" || echo '---')"
+  done
+}
+
+cmd_down() {
+  local pid
+  if ! pid="$(managed_tunnel_pid)"; then
+    printf 'managed cloudflared was not running\n'
+    return 0
+  fi
+  kill -TERM "$pid" 2>/dev/null || true
+  # Verify the exact managed PID rather than assuming TERM succeeded.
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    die "managed cloudflared pid $pid is STILL running after TERM; the origin may remain publicly reachable"
+  fi
+  printf '0\n' >"$pid_file"
+  printf 'stopped managed cloudflared pid %s; other tunnels were untouched\n' "$pid"
+}
+
+cmd_destroy() {
+  need_tools
+  cmd_down || true
+  local id pair host fqdn rec
+  id="$(find_tunnel_id || true)"
+  for pair in $TUNNEL_INGRESS; do
+    host="${pair%%=*}"; fqdn="${host}.${CLOUDFLARE_ZONE_NAME}"
+    rec="$(cf_zone GET "/dns_records?name=${fqdn}" | jq -r '.result[0].id // empty')"
+    if [ -n "$rec" ]; then
+      cf_zone DELETE "/dns_records/$rec" >/dev/null && printf '  dns %s removed\n' "$fqdn"
+    fi
+  done
+  if [ -n "$id" ]; then
+    cf_account DELETE "/cfd_tunnel/$id" >/dev/null && printf 'tunnel %s deleted\n' "$TUNNEL_NAME"
+  fi
+  rm -f -- "$state_dir/token" "$state_dir/id"
+}
+
+need_tools() {
+  command -v jq >/dev/null 2>&1 || die "jq not found — run 'nix develop'"
+  command -v cloudflared >/dev/null 2>&1 || die "cloudflared not found — run 'nix develop'"
+  require_filled CLOUDFLARE_API_TOKEN
+}
+
+# Refuse to put an unauthenticated origin on the public internet.
+#
+# This guard exists because the mistake was made for real: a tunnel was raised
+# over an api-server left with SOUND_RECORDER_ALLOW_PUBLIC_DEVICE_REGISTRATION
+# enabled for local testing. Anyone who found the hostname could register a
+# device and be handed a writable presigned URL into a paid R2 bucket — an open
+# write relay, billed to the account. Cross-account isolation held, so it was an
+# abuse and cost problem rather than a data-disclosure one, but it should never
+# have been reachable.
+#
+# A tunnel makes "just for local testing" indistinguishable from production
+# exposure, so the check lives here rather than in a runbook nobody rereads.
+# Set TUNNEL_ALLOW_OPEN_ORIGIN=1 to override deliberately.
+preflight_origins() {
+  [ "${TUNNEL_ALLOW_OPEN_ORIGIN:-0}" = "1" ] && {
+    printf 'preflight skipped (TUNNEL_ALLOW_OPEN_ORIGIN=1)\n' >&2
+    return 0
+  }
+
+  local pair host svc failed=0
+  for pair in $TUNNEL_INGRESS; do
+    host="${pair%%=*}"; svc="${pair#*=}"
+
+    # Only the mobile API exposes anonymous registration; probing every origin
+    # for it would be noise.
+    local body
+    body="$(curl -s -m 8 -X POST "$svc/api/mobile/v1/devices/register" \
+      -H 'Content-Type: application/json' \
+      -d '{"platform":"android","installId":"tunnel-preflight-probe","consentVersion":"v1","recordingIndicatorAcknowledged":true}' \
+      2>/dev/null || true)"
+
+    if printf '%s' "$body" | jq -e '.deviceToken' >/dev/null 2>&1; then
+      printf '\n  REFUSING to expose %s (%s)\n' "${host}.${CLOUDFLARE_ZONE_NAME}" "$svc" >&2
+      printf '  It grants device tokens to unauthenticated callers, and a device token\n' >&2
+      printf '  yields a writable presigned URL into the configured R2 bucket.\n\n' >&2
+      printf '  Fix one of:\n' >&2
+      printf '    SOUND_RECORDER_ALLOW_PUBLIC_DEVICE_REGISTRATION=false\n' >&2
+      printf '    SOUND_RECORDER_REGISTRATION_BEARER=<secret>   (require a bearer to register)\n' >&2
+      printf '    put Cloudflare Access in front of the hostname\n' >&2
+      printf '  Or override deliberately: TUNNEL_ALLOW_OPEN_ORIGIN=1 just tunnel-up\n' >&2
+      failed=1
+    fi
+  done
+  [ "$failed" = 0 ] || die "preflight failed; tunnel not started"
+  printf 'preflight ok: no origin hands out credentials anonymously\n'
+}
+
+case "$action" in
+  up) cmd_up ;;
+  status) cmd_status ;;
+  down) cmd_down ;;
+  destroy) cmd_destroy ;;
+  *) die "unknown action '$action' (up|status|down|destroy)" ;;
+esac
