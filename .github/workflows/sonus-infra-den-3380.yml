@@ -1,0 +1,31 @@
+name: Sonus infra DEN-3380 exact-head contract
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sonus-infra-den-3380-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  certify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12"
+          cache: ""
+      - name: Compile independent snapshot tests
+        run: python -m compileall -q tests
+      - name: Verify source identity, shell syntax, and tunnel boundaries
+        run: python -m unittest -v tests/test_sonus_infra_den_3380_snapshot.py
+      - name: Verify the test did not mutate tracked evidence
+        run: git diff --exit-code

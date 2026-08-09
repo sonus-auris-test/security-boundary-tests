@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Shared helpers for the env-backed infra scripts. Source, do not execute.
+#
+# The rule these enforce: decrypted secrets are loaded into the process
+# environment and never written to disk, never echoed, and never passed as
+# command-line arguments (argv is world-readable via ps).
+
+# shellcheck shell=bash
+
+sops_dotenv_opts=(--input-type dotenv --output-type dotenv)
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+# Load an env file into the current shell. Accepts either the encrypted
+# env/enc/<name>.env.enc (decrypted through sops in memory) or a plaintext
+# env/dec/<name>.env, so the scripts work the same before and after `just use`.
+load_env_file() {
+  local path="$1" content line name value
+
+  [ -n "$path" ] || die "no env file given"
+  [ -f "$path" ] || die "no such env file: $path"
+
+  case "$path" in
+    *.enc)
+      command -v sops >/dev/null 2>&1 || die "sops not found — run 'nix develop'"
+      content="$(sops decrypt "${sops_dotenv_opts[@]}" "$path")" \
+        || die "could not decrypt $path (is your age key a recipient? try 'just doctor')"
+      ;;
+    *)
+      content="$(cat -- "$path")"
+      ;;
+  esac
+
+  # Parse dotenv assignments as data, not shell. `source` made ordinary dotenv
+  # values containing spaces execute their second word as a command, and it
+  # would also execute command substitutions if a decrypted file were ever
+  # malformed or tampered with. Keep the plaintext in memory and export only
+  # conservative POSIX variable names.
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]]; then
+      name="${BASH_REMATCH[2]}"
+      value="${BASH_REMATCH[3]}"
+    else
+      die "invalid dotenv assignment in $path"
+    fi
+
+    # Whitespace around the value is formatting. Interior whitespace is data,
+    # which matters for TUNNEL_INGRESS's space-separated hostname mappings.
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    case "$value" in
+      \"*)
+        [ "${#value}" -ge 2 ] && [[ "$value" == *\" ]] ||
+          die "unterminated double-quoted value in $path"
+        value="${value:1:${#value}-2}"
+        ;;
+      \'*)
+        [ "${#value}" -ge 2 ] && [[ "$value" == *\' ]] ||
+          die "unterminated single-quoted value in $path"
+        value="${value:1:${#value}-2}"
+        ;;
+    esac
+
+    printf -v "$name" '%s' "$value"
+    export "$name"
+  done <<<"$content"
+}
+
+# Fail loudly on values still carrying a REPLACE_ME placeholder, naming each one
+# rather than letting a request fail later with an opaque 401.
+require_filled() {
+  local missing=() name value
+  for name in "$@"; do
+    value="${!name-}"
+    if [ -z "$value" ]; then
+      missing+=("$name (unset or empty)")
+    elif [[ "$value" == REPLACE_ME__* ]]; then
+      missing+=("$name (still a placeholder)")
+    fi
+  done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    printf 'error: required values are not filled in:\n' >&2
+    printf '  - %s\n' "${missing[@]}" >&2
+    printf '\nFill them with: just edit <env>\n' >&2
+
+    # Tailor the hint to what is actually missing. Telling someone to mint an R2
+    # key when the missing value is a Cloudflare REST token sends them to the
+    # wrong dashboard page.
+    if printf '%s\n' "${missing[@]}" | grep -qE 'ACCESS_KEY|SECRET'; then
+      printf '\nR2 S3 keys come from the Cloudflare dashboard:\n' >&2
+      printf '  R2 > API > Manage API Tokens > Create Account API token\n' >&2
+      printf '  Permission "Object Read & Write", scoped to the bucket.\n' >&2
+    fi
+    if printf '%s\n' "${missing[@]}" | grep -q 'CLOUDFLARE_API_TOKEN'; then
+      printf '\nCLOUDFLARE_API_TOKEN is a Cloudflare REST token (My Profile >\n' >&2
+      printf 'API Tokens), not an R2 S3 key. Note that env/enc/release.env.enc\n' >&2
+      printf 'deliberately carries no such token: release publishing must not hold\n' >&2
+      printf 'DNS-capable credentials. Run DNS commands against prod/staging/dev.\n' >&2
+    fi
+    exit 1
+  fi
+}
+
+# Redact a secret down to a recognisable fingerprint for log output.
+fingerprint() {
+  local value="$1"
+  if [ "${#value}" -le 8 ]; then
+    printf '****'
+  else
+    printf '%s…%s' "${value:0:4}" "${value: -4}"
+  fi
+}
+
+cf_api() {
+  local method="$1" path="$2"
+  shift 2
+  curl -sS -X "$method" "https://api.cloudflare.com/client/v4${path}" \
+    -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+    -H "Content-Type: application/json" \
+    "$@"
+}

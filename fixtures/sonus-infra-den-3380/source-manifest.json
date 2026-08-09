@@ -1,0 +1,38 @@
+{
+  "source_repository": "sonus-auris/sonus-auris.infra",
+  "source_visibility": "private",
+  "source_pull_request": 5,
+  "source_commit": "1e08ff61066e3b19b83fb41661b12db069e2de85",
+  "source_tree": "616acb176fb6dc1fba5b3a4ab6965994770d3712",
+  "linear_issue": "DEN-3380",
+  "files": {
+    "AGENTS.md": {
+      "blob": "4bba4d62f61e961996a01d43c31af39ed9cc4c9b",
+      "mode": "100644"
+    },
+    "agents.md": {
+      "blob": "807a6dd937c809be6bc286c8116d684e210e9a29",
+      "mode": "100644"
+    },
+    ".claude/CLAUDE.md": {
+      "blob": "f6f75fef15ec9176362346fa5d9299b5b1528159",
+      "mode": "100644"
+    },
+    ".gemini/GEMINI.md": {
+      "blob": "f6f75fef15ec9176362346fa5d9299b5b1528159",
+      "mode": "100644"
+    },
+    ".openai/AGENTS.md": {
+      "blob": "f6f75fef15ec9176362346fa5d9299b5b1528159",
+      "mode": "100644"
+    },
+    "scripts/_env-lib": {
+      "blob": "242fb1d793b6c6c1add10b93b4bd5cb17a1672df",
+      "mode": "100644"
+    },
+    "scripts/cf-tunnel": {
+      "blob": "efda696848f3008b2a1002bed4214533b643592f",
+      "mode": "100755"
+    }
+  }
+}
