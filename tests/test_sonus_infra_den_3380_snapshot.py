@@ -160,8 +160,8 @@ class SonusInfraDen3380SnapshotTests(unittest.TestCase):
         self.assertIn('kill -0 "$pid"', body)
         self.assertIn('ps -ww -p "$pid" -o command=', body)
         self.assertIn('"--token-file $state_dir/token"', body)
-        self.assertNotIn("pgrep", script)
-        self.assertNotIn("pkill -f", script)
+        self.assertNotIn("pgrep", body)
+        self.assertNotIn("pkill", body)
 
         down = re.search(r"(?ms)^cmd_down\(\) \{\n(?P<body>.*?)^\}", script)
         self.assertIsNotNone(down)
