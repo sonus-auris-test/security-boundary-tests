@@ -5,5 +5,5 @@ edition = "2024"
 publish = false
 
 [dependencies]
-ores-middleware = { git = "https://github.com/ORESoftware/ores-middleware", rev = "2a93e6edc978c6f576d0fb63ce8f730a09458cc8", default-features = false }
+ores-middleware = { git = "https://github.com/ORESoftware/ores-middleware", rev = "00ec8e427cee04df65887ecaa630ff35a7ccc3b2", default-features = false }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
