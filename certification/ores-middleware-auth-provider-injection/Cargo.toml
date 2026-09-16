@@ -1,0 +1,9 @@
+[package]
+name = "sonus-auris-ores-middleware-auth-security-certification"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ores-middleware = { git = "https://github.com/ORESoftware/ores-middleware", rev = "be782e0312a2ddc70dddd2a791b8dfdac527c82b", default-features = false }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

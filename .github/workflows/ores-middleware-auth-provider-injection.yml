@@ -1,0 +1,34 @@
+name: ores-middleware auth security boundary
+
+on:
+  pull_request:
+    paths:
+      - 'certification/ores-middleware-auth-provider-injection/**'
+      - '.github/workflows/ores-middleware-auth-provider-injection.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ores-middleware-auth-security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security-boundary:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+      - name: Format check
+        run: cargo fmt --manifest-path certification/ores-middleware-auth-provider-injection/Cargo.toml --all -- --check
+      - name: Run auth security-boundary tests
+        run: cargo test --manifest-path certification/ores-middleware-auth-provider-injection/Cargo.toml --all-targets
+      - name: Clippy
+        run: cargo clippy --manifest-path certification/ores-middleware-auth-provider-injection/Cargo.toml --all-targets -- -D warnings
