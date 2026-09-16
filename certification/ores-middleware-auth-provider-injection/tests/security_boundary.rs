@@ -62,7 +62,10 @@ fn provider() -> std::sync::Arc<dyn AuthVerifier> {
 #[tokio::test]
 async fn provider_specific_error_cannot_leak_raw_credential_through_adapter() {
     let raw_secret = "Bearer definitely-secret-token-value";
-    let error = provider().verify(&request(Some(raw_secret))).await.unwrap_err();
+    let error = provider()
+        .verify(&request(Some(raw_secret)))
+        .await
+        .unwrap_err();
 
     assert_eq!(error.code, "invalid_auth");
     assert_eq!(error.message, "provider rejected credentials");
