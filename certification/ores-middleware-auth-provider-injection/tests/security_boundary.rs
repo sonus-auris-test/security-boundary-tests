@@ -100,10 +100,7 @@ async fn concurrent_accept_and_reject_paths_remain_independent_without_dyn_dispa
             } else {
                 let subject = format!("subject-{index}");
                 let token = format!("Bearer ok:{subject}");
-                let decision = provider
-                    .verify_owned(request(Some(&token)))
-                    .await
-                    .unwrap();
+                let decision = provider.verify_owned(request(Some(&token))).await.unwrap();
                 assert_eq!(decision.user_id.as_deref(), Some(subject.as_str()));
                 assert_eq!(decision.tenant_id.as_deref(), Some("audio-tenant"));
             }
