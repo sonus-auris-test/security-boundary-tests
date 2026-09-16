@@ -1,0 +1,30 @@
+name: ores-middleware-provider-injection
+
+on:
+  pull_request:
+    paths:
+      - "certification/ores-middleware-auth-provider-injection/**"
+      - ".github/workflows/ores-middleware-provider-injection.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-certification:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install reviewed Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+      - name: Format certification sources
+        run: cargo fmt --check --manifest-path certification/ores-middleware-auth-provider-injection/Cargo.toml
+      - name: Run provider-injection certification
+        run: cargo test --manifest-path certification/ores-middleware-auth-provider-injection/Cargo.toml --all-targets
