@@ -93,14 +93,12 @@ async fn concurrent_accept_and_reject_paths_remain_independent() {
                     .expect_err("invalid token must fail closed");
                 assert_eq!(error.code, "invalid_auth");
                 assert!(!error.message.contains(&token));
-                None
             } else {
                 let subject = format!("subject-{index}");
                 let token = format!("Bearer ok:{subject}");
                 let decision = provider.verify(&request(Some(&token))).await.unwrap();
                 assert_eq!(decision.user_id.as_deref(), Some(subject.as_str()));
                 assert_eq!(decision.tenant_id.as_deref(), Some("audio-tenant"));
-                Some(subject)
             }
         }));
     }
