@@ -1,8 +1,7 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use ores_middleware::{
-    AuthDecision, AuthVerifier, IntegrationError, RequestMetadata, auth_provider_fn,
-    dyn_auth_provider,
+    AuthDecision, IntegrationError, RequestMetadata, StaticAuthVerifier, auth_provider_fn,
 };
 
 fn request(token: Option<&str>) -> RequestMetadata {
@@ -33,9 +32,9 @@ impl LeakySdk {
     }
 }
 
-fn provider() -> std::sync::Arc<dyn AuthVerifier> {
+fn provider() -> impl StaticAuthVerifier {
     let sdk = LeakySdk;
-    dyn_auth_provider(auth_provider_fn(move |request: RequestMetadata| {
+    auth_provider_fn(move |request: RequestMetadata| {
         let sdk = sdk.clone();
         async move {
             let token = request
@@ -56,14 +55,15 @@ fn provider() -> std::sync::Arc<dyn AuthVerifier> {
                 claims: BTreeMap::new(),
             })
         }
-    }))
+    })
 }
 
 #[tokio::test]
-async fn provider_specific_error_cannot_leak_raw_credential_through_adapter() {
+async fn provider_specific_error_cannot_leak_raw_credential_through_static_adapter() {
     let raw_secret = "Bearer definitely-secret-token-value";
-    let error = provider()
-        .verify(&request(Some(raw_secret)))
+    let provider = provider();
+    let error = provider
+        .verify_owned(request(Some(raw_secret)))
         .await
         .unwrap_err();
 
@@ -75,23 +75,24 @@ async fn provider_specific_error_cannot_leak_raw_credential_through_adapter() {
 
 #[tokio::test]
 async fn missing_credentials_fail_closed_without_provider_specific_details() {
-    let error = provider().verify(&request(None)).await.unwrap_err();
+    let provider = provider();
+    let error = provider.verify_owned(request(None)).await.unwrap_err();
     assert_eq!(error.code, "missing_auth");
     assert_eq!(error.message, "authorization header is required");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_accept_and_reject_paths_remain_independent() {
-    let provider = provider();
+async fn concurrent_accept_and_reject_paths_remain_independent_without_dyn_dispatch() {
+    let provider = Arc::new(provider());
     let mut tasks = Vec::new();
 
     for index in 0..192_u32 {
-        let provider = provider.clone();
+        let provider = Arc::clone(&provider);
         tasks.push(tokio::spawn(async move {
             if index % 3 == 0 {
                 let token = format!("Bearer bad-secret-{index}");
                 let error = provider
-                    .verify(&request(Some(&token)))
+                    .verify_owned(request(Some(&token)))
                     .await
                     .expect_err("invalid token must fail closed");
                 assert_eq!(error.code, "invalid_auth");
@@ -99,7 +100,10 @@ async fn concurrent_accept_and_reject_paths_remain_independent() {
             } else {
                 let subject = format!("subject-{index}");
                 let token = format!("Bearer ok:{subject}");
-                let decision = provider.verify(&request(Some(&token))).await.unwrap();
+                let decision = provider
+                    .verify_owned(request(Some(&token)))
+                    .await
+                    .unwrap();
                 assert_eq!(decision.user_id.as_deref(), Some(subject.as_str()));
                 assert_eq!(decision.tenant_id.as_deref(), Some("audio-tenant"));
             }
@@ -109,4 +113,11 @@ async fn concurrent_accept_and_reject_paths_remain_independent() {
     for task in tasks {
         task.await.unwrap();
     }
+}
+
+#[test]
+fn security_provider_remains_a_concrete_static_type() {
+    fn assert_static<P: StaticAuthVerifier>(_provider: &P) {}
+    let provider = provider();
+    assert_static(&provider);
 }
