@@ -60,10 +60,12 @@ async fn incompatible_shared_auth_sdk_shapes_adapt_without_dyn_provider_dispatch
                     .headers
                     .get("authorization")
                     .cloned()
-                    .ok_or_else(|| SharedAuthProviderFailure::rejected(
-                        "missing_auth",
-                        "authorization header is required",
-                    ))?;
+                    .ok_or_else(|| {
+                        SharedAuthProviderFailure::rejected(
+                            "missing_auth",
+                            "authorization header is required",
+                        )
+                    })?;
                 let subject = sdk.verify(token).await.map_err(|_| {
                     SharedAuthProviderFailure::rejected(
                         "invalid_auth",
@@ -93,10 +95,12 @@ async fn incompatible_shared_auth_sdk_shapes_adapt_without_dyn_provider_dispatch
                     .headers
                     .get("authorization")
                     .cloned()
-                    .ok_or_else(|| SharedAuthProviderFailure::rejected(
-                        "missing_auth",
-                        "authorization header is required",
-                    ))?;
+                    .ok_or_else(|| {
+                        SharedAuthProviderFailure::rejected(
+                            "missing_auth",
+                            "authorization header is required",
+                        )
+                    })?;
                 let (subject, tenant) = sdk.authenticate(token).await.map_err(|_| {
                     SharedAuthProviderFailure::rejected(
                         "invalid_auth",
@@ -120,7 +124,10 @@ async fn incompatible_shared_auth_sdk_shapes_adapt_without_dyn_provider_dispatch
     let supabase_principal = supabase_provider
         .verify_owned(
             request("supabase-v1:alice"),
-            context(SharedAuthProvider::Supabase, "https://supabase.example.test"),
+            context(
+                SharedAuthProvider::Supabase,
+                "https://supabase.example.test",
+            ),
         )
         .await
         .unwrap();
@@ -144,7 +151,9 @@ async fn incompatible_shared_auth_sdk_shapes_adapt_without_dyn_provider_dispatch
 async fn shared_auth_adapter_preserves_provider_failure_classification_without_sdk_types_in_core() {
     let provider = shared_auth_provider_fn(
         |_request: RequestMetadata, _context: SharedAuthProviderContext| async move {
-            Err(SharedAuthProviderFailure::unavailable("simulated provider outage"))
+            Err(SharedAuthProviderFailure::unavailable(
+                "simulated provider outage",
+            ))
         },
     );
 
